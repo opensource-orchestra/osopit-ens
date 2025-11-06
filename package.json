@@ -1,0 +1,16 @@
+{
+  "name": "durin-ens-l2",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Durin ENS L2 Subnames with Invite System",
+  "scripts": {
+    "generate-invite": "bun run scripts/generate-invite.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.1",
+    "viem": "^2.21.54"
+  },
+  "dependencies": {
+    "zod": "^4.1.12"
+  }
+}

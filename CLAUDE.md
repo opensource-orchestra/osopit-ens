@@ -138,11 +138,169 @@ Adding a new chain requires:
 1. Adding chain to `supportedChains` array in `gateway/src/ccip-read/query.ts`
 2. Deploying L2 contracts via `DeployL2Contracts.s.sol`
 
+## Invite-Based Registration System
+
+The L2Registrar has been extended with an invite-based registration system:
+
+### Contract Implementation
+
+**State Variables:**
+- `mapping(address => bool) public inviters` - Whitelist of approved inviters
+- `mapping(bytes32 => bool) public usedInvites` - Tracks used invite signatures (prevents replay)
+- `address public immutable owner` - Contract owner for admin functions
+
+**Admin Functions:**
+- `addInviter(address)` - Add address to inviter whitelist (onlyOwner)
+- `removeInviter(address)` - Remove address from whitelist (onlyOwner)
+
+**Registration Function:**
+```solidity
+function registerWithInvite(
+    string calldata label,
+    address owner,
+    uint256 expiration,
+    address inviter,
+    bytes calldata signature
+) external
+```
+
+**Signature Format:**
+- Message: `keccak256(abi.encodePacked(address(registrar), label, owner, expiration))`
+- Wrapped with EIP-191: `toEthSignedMessageHash()`
+- Validated using UniversalSignatureValidator at 0x164af34fAF9879394370C7f09064127C043A35E9
+
+### Frontend Implementation
+
+**Invite Generation (/invite page):**
+1. Whitelisted wallet connects
+2. Inputs subdomain, optional recipient address, expiration
+3. Signs message client-side via `signMessage`
+4. Generates shareable URL: `/onboarding?invite={base64EncodedData}`
+
+**Onboarding Flow (/onboarding page):**
+1. Checks URL params for `?invite=...` code
+2. Decodes and validates expiration
+3. Pre-fills subdomain (locked for editing)
+4. Shows invite badge with inviter address
+5. Passes invite data to registration hook
+
+**useCreateProfile Hook:**
+1. Uploads avatar to IPFS (placeholder - needs Pinata/Thirdweb/NFT.Storage)
+2. Calls `L2Registrar.registerWithInvite()` with signature
+3. Sets ENS text records via L2Registry multicall:
+   - `description` (bio)
+   - `avatar` (IPFS URL)
+   - `app.osopit.socials` (JSON)
+   - `app.osopit.streaming` (false)
+
+### Deployment Steps
+
+1. Deploy updated L2Registrar with invite logic
+2. Call `L2Registry.addRegistrar(newRegistrarAddress)`
+3. Call `L2Registrar.addInviter(address)` for each approved inviter
+4. Update L2_REGISTRAR_ADDRESS in web app (`/apps/web/src/hooks/useCreateProfile.ts` and `/apps/web/src/app/invite/page.tsx`)
+
+### Security Fixes Applied
+
+**Critical vulnerabilities fixed:**
+
+1. **register() bypass vulnerability (FIXED)**
+   - Previously: Anyone could call `register()` and bypass entire invite system
+   - Now: `register()` restricted to `onlyOwner` for admin/emergency use only
+   - Regular users MUST use `registerWithInvite()` with valid signature
+
+2. **Recipient validation (FIXED)**
+   - Added check: `if (recipient != address(0) && msg.sender != recipient) revert Unauthorized()`
+   - Prevents unauthorized registration even with valid invite signature
+   - Ensures only intended recipient can use invite
+
+3. **Checks-effects-interactions pattern (FIXED)**
+   - Moved `usedInvites[inviteId] = true` before external calls
+   - Prevents potential reentrancy attacks
+
+4. **setAddr call order (FIXED)**
+   - Moved `createSubnode()` BEFORE `setAddr()` calls
+   - Node must exist before setting addresses
+
+5. **Parameter shadowing (FIXED)**
+   - Renamed `address owner` → `address recipient` throughout
+   - Eliminates compiler warnings
+
+6. **OpenZeppelin Ownable (IMPLEMENTED)**
+   - Replaced manual owner implementation with battle-tested OZ Ownable
+   - Gains `transferOwnership()` and `renounceOwnership()` capabilities
+   - Industry standard, audited code
+
+### Frontend Improvements Applied
+
+1. **Node hash calculation (IMPLEMENTED)**
+   - Fetches `baseNode` from L2Registry via RPC
+   - Correctly calculates node: `keccak256(baseNode || labelHash)`
+   - Text records now set properly
+
+2. **Transaction receipt waiting (IMPLEMENTED)**
+   - Replaced all `setTimeout` with `waitForTransactionReceipt`
+   - Checks `receipt.status === 'reverted'`
+   - Proper error handling
+
+3. **Error parsing (IMPLEMENTED)**
+   - Specific error messages for: `InviteAlreadyUsed`, `SignatureExpired`, `InvalidInviter`, `NotAvailable`, `Unauthorized`
+   - User-friendly feedback
+
+4. **Recipient validation in UI (IMPLEMENTED)**
+   - Checks if invite is for specific address
+   - Validates connected wallet matches
+   - Shows warnings appropriately
+
+5. **IPFS upload (IMPLEMENTED)**
+   - Backend API route `/api/upload-ipfs` using Pinata
+   - Validates file size (max 10MB) and type (images only)
+   - Secure JWT handling server-side
+
+6. **Subdomain validation (IMPLEMENTED)**
+   - Real-time validation: min 3, max 32 chars, alphanumeric + hyphens
+   - Cannot start/end with hyphen
+   - Button disabled when invalid
+
+### Helper Scripts
+
+**Generate invite signatures:**
+```bash
+# Install dependencies
+bun install
+
+# Generate invite (defaults: label=alice, recipient=0x0, expiration=7 days)
+bun run generate-invite
+
+# Generate invite with custom parameters
+bun run generate-invite myname 0xRecipientAddress 14
+
+# Required environment variable
+export INVITER_PRIVATE_KEY=0x...
+export L2_REGISTRAR_ADDRESS=0x...
+```
+
+The script outputs:
+- Invite URL with base64-encoded signature
+- Cast command for CLI testing
+- Full invite details for debugging
+
+### TODOs (Configuration Only)
+
+- Configure PINATA_JWT in `.env` (required for avatar uploads)
+- Update L2_REGISTRAR_ADDRESS after deployment
+- Deploy to Base Sepolia for testing before mainnet
+
 ## Development Notes
 
 - Solidity version: 0.8.24 (Cancun EVM)
 - Uses OpenZeppelin, ENS contracts, and solidity-stringutils libraries
 - Test framework: Foundry with 256 fuzz runs
-- Gateway uses viem for Ethereum interactions
+- Gateway and frontend use viem for Ethereum interactions
+- Scripts use Bun runtime with TypeScript (no build step)
 - L2Registry stores names in DNS-encoded format (see ENSDNSUtils.sol)
 - Signature verification uses UniversalSigValidator at 0x164af34fAF9879394370C7f09064127C043A35E9
+  - Deployed on Base mainnet (verified)
+  - EIP-6492 compliant (supports counterfactual contracts)
+  - EIP-1271 compliant (supports smart contract wallets)
+  - Source: ENS contracts, deterministically deployed via Nick's Method
